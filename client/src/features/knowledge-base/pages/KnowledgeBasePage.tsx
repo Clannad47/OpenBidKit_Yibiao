@@ -2,7 +2,7 @@ import { Profiler, startTransition, useEffect, useLayoutEffect, useMemo, useRef,
 import * as Dialog from '@radix-ui/react-dialog';
 import { trackPageView } from '../../../shared/analytics/analytics';
 import { AppDialog, InlineSpinner, isLibreOfficeRequiredMessage, MarkdownFullscreenViewer, MarkdownRenderer, ProgressBar, useDocumentParseNotice, useToast } from '../../../shared/ui';
-import type { KnowledgeAnalysisSnapshot, KnowledgeBaseIndex, KnowledgeBaseSearchResult, KnowledgeDocument, KnowledgeItem } from '../types';
+import type { KnowledgeAnalysisSnapshot, KnowledgeBaseIndex, KnowledgeBaseSearchPage, KnowledgeBaseSearchResult, KnowledgeDocument, KnowledgeItem } from '../types';
 
 declare global {
   interface Window {
@@ -325,7 +325,8 @@ function KnowledgeBasePage() {
   const [deletingConfirm, setDeletingConfirm] = useState(false);
   const [searchKeyword, setSearchKeyword] = useState('');
   const [submittedSearchKeyword, setSubmittedSearchKeyword] = useState('');
-  const [searchResults, setSearchResults] = useState<KnowledgeBaseSearchResult[]>([]);
+  const [searchPage, setSearchPage] = useState<KnowledgeBaseSearchPage | null>(null);
+  const [searchError, setSearchError] = useState('');
   const [searchLoading, setSearchLoading] = useState(false);
   const searchRequestIdRef = useRef(0);
   const autoMatchingIdsRef = useRef(new Set<string>());
@@ -574,38 +575,42 @@ function KnowledgeBasePage() {
     }
   };
 
-  const runGlobalSearch = async () => {
-    const keyword = searchKeyword.trim();
-    if (!keyword) {
-      searchRequestIdRef.current += 1;
-      setSubmittedSearchKeyword('');
-      setSearchResults([]);
-      return;
-    }
-
-    const requestId = searchRequestIdRef.current + 1;
-    searchRequestIdRef.current = requestId;
-    setSubmittedSearchKeyword(keyword);
-    setSearchResults([]);
+  const fetchGlobalSearch = async (keyword: string, page: number) => {
+    const requestId = ++searchRequestIdRef.current;
+    setSearchError('');
     setSearchLoading(true);
     try {
-      const results = await window.yibiao?.knowledgeBase.search(keyword);
+      const result = await window.yibiao.knowledgeBase.search({ keyword, page });
       if (searchRequestIdRef.current !== requestId) return;
-      setSearchResults(results || []);
+      setSearchPage(result);
     } catch (error) {
       if (searchRequestIdRef.current === requestId) {
-        showToast(error instanceof Error ? error.message : '知识库检索失败', 'error');
+        const message = error instanceof Error ? error.message : '知识库检索失败';
+        setSearchError(message);
+        showToast(message, 'error');
       }
     } finally {
       if (searchRequestIdRef.current === requestId) setSearchLoading(false);
     }
   };
 
+  const runGlobalSearch = async () => {
+    const keyword = searchKeyword.trim();
+    if (!keyword) {
+      clearGlobalSearch();
+      return;
+    }
+    setSubmittedSearchKeyword(keyword);
+    setSearchPage(null);
+    await fetchGlobalSearch(keyword, 1);
+  };
+
   const clearGlobalSearch = () => {
     searchRequestIdRef.current += 1;
     setSearchKeyword('');
     setSubmittedSearchKeyword('');
-    setSearchResults([]);
+    setSearchPage(null);
+    setSearchError('');
     setSearchLoading(false);
   };
 
@@ -1001,7 +1006,9 @@ function KnowledgeBasePage() {
       {submittedSearchKeyword && (
         <KnowledgeSearchResults
           keyword={submittedSearchKeyword}
-          results={searchResults}
+          resultPage={searchPage}
+          error={searchError}
+          onPageChange={(page) => { void fetchGlobalSearch(submittedSearchKeyword, page); }}
           loading={searchLoading}
           onOpenResult={(result) => { void openSearchResult(result); }}
         />
@@ -1612,27 +1619,31 @@ export default KnowledgeBasePage;
 
 interface KnowledgeSearchResultsProps {
   keyword: string;
-  results: KnowledgeBaseSearchResult[];
+  resultPage: KnowledgeBaseSearchPage | null;
+  error: string;
   loading: boolean;
+  onPageChange: (page: number) => void;
   onOpenResult: (result: KnowledgeBaseSearchResult) => void;
 }
 
-function KnowledgeSearchResults({ keyword, results, loading, onOpenResult }: KnowledgeSearchResultsProps) {
+function KnowledgeSearchResults({ keyword, resultPage, error, loading, onPageChange, onOpenResult }: KnowledgeSearchResultsProps) {
+  const listRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    if (listRef.current) listRef.current.scrollTop = 0;
+  }, [resultPage]);
+  const results = resultPage?.items || [];
+  const totalPages = resultPage ? Math.max(1, Math.ceil(resultPage.total / resultPage.pageSize)) : 1;
+
   return (
-    <section className="knowledge-search-panel">
+    <section className="knowledge-search-panel" aria-busy={loading}>
       <div className="knowledge-panel-head">
         <strong>“{keyword}”的检索结果</strong>
-        <span>{loading ? '正在检索' : `${results.length} 条知识`}</span>
+        <span aria-live="polite">{loading ? '正在检索' : resultPage ? `共 ${resultPage.total} 条知识` : '检索失败'}</span>
       </div>
-      {loading ? (
-        <div className="knowledge-empty-box large">
-          <InlineSpinner />
-          <strong>正在检索全部知识库...</strong>
-          <p>检索完成后会显示对应文档和知识片段。</p>
-        </div>
-      ) : results.length ? (
-        <div className="knowledge-search-result-list">
-          {results.map((result) => (
+      {resultPage ? (
+        <div className="knowledge-search-result-list" ref={listRef}>
+          {error && <p role="alert">检索失败，仍显示上次成功的结果。请重新检索或翻页。{error}</p>}
+          {results.length ? results.map((result) => (
             <article className="knowledge-search-result-card" key={`${result.document_id}:${result.item_id}`}>
               <div className="knowledge-search-result-path">
                 <span>{result.folder_name}</span>
@@ -1643,12 +1654,32 @@ function KnowledgeSearchResults({ keyword, results, loading, onOpenResult }: Kno
               <p>{result.snippet || result.resume || '该条目暂无可显示片段'}</p>
               <button type="button" className="knowledge-item-source-action" onClick={() => onOpenResult(result)}>打开知识条目</button>
             </article>
-          ))}
+          )) : (
+            <div className="knowledge-empty-box large">
+              <strong>没有找到相关知识</strong>
+              <p>请更换关键字，或确认相关文档已经完成知识整理。</p>
+            </div>
+          )}
         </div>
       ) : (
         <div className="knowledge-empty-box large">
-          <strong>没有找到相关知识</strong>
-          <p>请更换关键字，或确认相关文档已经完成知识整理。</p>
+          {loading ? <>
+            <InlineSpinner />
+            <strong>正在检索全部知识库...</strong>
+            <p>检索完成后会显示对应文档和知识片段。</p>
+          </> : <>
+            <strong>知识库检索失败</strong>
+            <p role="alert">{error} 请点击“检索”重试。</p>
+          </>}
+        </div>
+      )}
+      {resultPage && resultPage.total > 0 && (
+        <div className="knowledge-search-pagination">
+          <span>第 {resultPage.page} / {totalPages} 页 · 当前显示 {(resultPage.page - 1) * resultPage.pageSize + 1}–{(resultPage.page - 1) * resultPage.pageSize + results.length} 条</span>
+          <div>
+            <button type="button" className="secondary-action" disabled={loading || resultPage.page <= 1} onClick={() => onPageChange(resultPage.page - 1)}>上一页</button>
+            <button type="button" className="secondary-action" disabled={loading || resultPage.page >= totalPages} onClick={() => onPageChange(resultPage.page + 1)}>下一页</button>
+          </div>
         </div>
       )}
     </section>

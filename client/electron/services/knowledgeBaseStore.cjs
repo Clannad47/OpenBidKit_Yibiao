@@ -253,44 +253,44 @@ function createKnowledgeBaseStore({ app, db }) {
     return { folders, documents };
   }
 
-  function search(keyword) {
+  function search({ keyword, page }) {
+    const pageSize = 100;
     const normalizedKeyword = String(keyword || '').trim();
-    if (!normalizedKeyword) return [];
+    if (!normalizedKeyword) return { items: [], total: 0, page: 1, pageSize };
 
     const lowerKeyword = normalizedKeyword.toLocaleLowerCase();
-    const rows = db.prepare(`
-      SELECT d.document_id, d.folder_id, d.file_name, f.name AS folder_name,
-             i.item_id, i.title, i.resume, i.content
+    const matchSql = `
       FROM knowledge_items i
       INNER JOIN knowledge_documents d ON d.document_id = i.document_id
       INNER JOIN knowledge_folders f ON f.folder_id = d.folder_id
       WHERE d.status = 'success'
         AND (
-          instr(lower(COALESCE(d.file_name, '')), lower(?)) > 0
-          OR instr(lower(COALESCE(i.title, '')), lower(?)) > 0
-          OR instr(lower(COALESCE(i.resume, '')), lower(?)) > 0
-          OR instr(lower(COALESCE(i.content, '')), lower(?)) > 0
+          instr(lower(COALESCE(d.file_name, '')), @keyword) > 0
+          OR instr(lower(COALESCE(i.title, '')), @keyword) > 0
+          OR instr(lower(COALESCE(i.resume, '')), @keyword) > 0
+          OR instr(lower(COALESCE(i.content, '')), @keyword) > 0
         )
+    `;
+    const { rows, total, currentPage } = db.transaction(() => {
+      const { total } = db.prepare(`SELECT COUNT(*) AS total ${matchSql}`).get({ keyword: lowerKeyword });
+      const currentPage = Math.min(page, Math.max(1, Math.ceil(total / pageSize)));
+      const rows = total ? db.prepare(`
+      SELECT d.document_id, d.folder_id, d.file_name, f.name AS folder_name,
+             i.item_id, i.title, i.resume, i.content
+      ${matchSql}
       ORDER BY
         CASE
-          WHEN instr(lower(COALESCE(i.title, '')), lower(?)) > 0 THEN 0
-          WHEN instr(lower(COALESCE(i.resume, '')), lower(?)) > 0 THEN 1
-          WHEN instr(lower(COALESCE(i.content, '')), lower(?)) > 0 THEN 2
-          WHEN instr(lower(COALESCE(d.file_name, '')), lower(?)) > 0 THEN 3
+          WHEN instr(lower(COALESCE(i.title, '')), @keyword) > 0 THEN 0
+          WHEN instr(lower(COALESCE(i.resume, '')), @keyword) > 0 THEN 1
+          WHEN instr(lower(COALESCE(i.content, '')), @keyword) > 0 THEN 2
+          WHEN instr(lower(COALESCE(d.file_name, '')), @keyword) > 0 THEN 3
           ELSE 4
         END,
         d.updated_at DESC, i.sort_order ASC, i.id ASC
-      LIMIT 100
-    `).all(
-      lowerKeyword,
-      lowerKeyword,
-      lowerKeyword,
-      lowerKeyword,
-      lowerKeyword,
-      lowerKeyword,
-      lowerKeyword,
-      lowerKeyword,
-    );
+      LIMIT @limit OFFSET @offset
+      `).all({ keyword: lowerKeyword, limit: pageSize, offset: (currentPage - 1) * pageSize }) : [];
+      return { rows, total, currentPage };
+    })();
 
     const createSnippet = (value) => {
       const text = String(value || '').replace(/\s+/g, ' ').trim();
@@ -303,7 +303,7 @@ function createKnowledgeBaseStore({ app, db }) {
       return `${start > 0 ? '…' : ''}${text.slice(start, end)}${end < text.length ? '…' : ''}`;
     };
 
-    return rows.map((row) => {
+    const items = rows.map((row) => {
       const titleMatched = String(row.title || '').toLocaleLowerCase().includes(lowerKeyword);
       const resumeMatched = String(row.resume || '').toLocaleLowerCase().includes(lowerKeyword);
       const contentMatched = String(row.content || '').toLocaleLowerCase().includes(lowerKeyword);
@@ -327,6 +327,7 @@ function createKnowledgeBaseStore({ app, db }) {
         match_field: matchField,
       };
     });
+    return { items, total, page: currentPage, pageSize };
   }
 
   function recoverInterruptedDocuments(activeDocumentIds = []) {

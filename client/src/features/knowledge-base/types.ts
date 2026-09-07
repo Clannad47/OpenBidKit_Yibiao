@@ -20,6 +20,18 @@ export interface KnowledgeBaseSearchResult {
   match_field: KnowledgeSearchMatchField;
 }
 
+export interface KnowledgeBaseSearchRequest {
+  keyword: string;
+  page: number;
+}
+
+export interface KnowledgeBaseSearchPage {
+  items: KnowledgeBaseSearchResult[];
+  total: number;
+  page: number;
+  pageSize: number;
+}
+
 export interface KnowledgeCandidateItem {
   id: string;
   title: string;
